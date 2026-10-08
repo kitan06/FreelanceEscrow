@@ -7,13 +7,13 @@ A Solidity smart contract that provides an escrow system for freelance jobs, hel
 
 The project uses Foundry for automated testing.
 
-- Tests: 13
-- Passed: 13
+- Tests: 46
+- Passed: 46
 - Failed: 0
-- Line coverage: 97.62%
-- Statement coverage: 97.44%
+- Line coverage: 100%
+- Statement coverage: 100%
 - Function coverage: 100%
-- Branch coverage: 60.61%
+- Branch coverage: 98.51%
 
 Test file: `test/FreelanceEscrow.t.sol`
 
