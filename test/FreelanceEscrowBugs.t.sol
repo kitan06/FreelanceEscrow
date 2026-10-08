@@ -4,9 +4,11 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {FreelanceEscrow} from "../src/FreelanceEscrow.sol";
 
-/// @notice Proof-of-concept tests. They PASS on the current contract because they
-/// assert the buggy behaviour. After you fix the contract, flip the assertions
-/// (or delete these tests).
+/// @notice Regression tests for two accounting bugs that used to exist:
+/// 1. cancel / approve / resolve paid the full job amount even after milestones
+///    had already been paid, draining other jobs' funds.
+/// 2. Paying every existing milestone completed the job even when they summed to
+///    less than the job amount, which stranded the remainder.
 contract FreelanceEscrowBugsTest is Test {
     FreelanceEscrow escrow;
 
@@ -22,17 +24,15 @@ contract FreelanceEscrowBugsTest is Test {
         vm.deal(client2, 10 ether);
     }
 
-    /// Bug 1: milestones are paid out of the job's escrow, but cancelJob (and
-    /// approveJob / resolveDispute) still pay out the FULL job.amount. The
-    /// difference is taken from other jobs' funds, so the contract becomes insolvent.
-    function testBug_CancelAfterMilestonePaidDrainsOtherJobs() public {
-        // Job 0: client, 1 ether. Job 1: client2, 1 ether.
+    function _status(uint256 jobId) internal view returns (FreelanceEscrow.JobStatus status) {
+        (,,,, status) = escrow.jobs(jobId);
+    }
+
+    /// Job 0 has two 0.5 ether milestones, the first one is paid.
+    function _jobWithOneMilestonePaid() internal {
         vm.prank(client);
         escrow.createJob{value: 1 ether}(freelancer, "Job 0");
-        vm.prank(client2);
-        escrow.createJob{value: 1 ether}(freelancer, "Job 1");
 
-        // Two milestones so that paying one does not flip the job to Completed.
         vm.startPrank(client);
         escrow.addMilestone(0, "A", 0.5 ether);
         escrow.addMilestone(0, "B", 0.5 ether);
@@ -42,23 +42,76 @@ contract FreelanceEscrowBugsTest is Test {
         escrow.completeMilestone(0, 0);
 
         vm.prank(client);
-        escrow.approveMilestone(0, 0); // freelancer receives 0.5 ether
+        escrow.approveMilestone(0, 0);
+    }
 
-        // Client now cancels and is refunded the FULL 1 ether.
+    function testCancelAfterMilestoneRefundsOnlyRemainder() public {
+        _jobWithOneMilestonePaid();
+
+        // Another client's job is also sitting in escrow.
+        vm.prank(client2);
+        escrow.createJob{value: 1 ether}(freelancer, "Job 1");
+
         vm.prank(client);
         escrow.cancelJob(0);
 
-        // Escrow holds 0.5 ether, but job 1 is owed 1 ether.
-        assertEq(address(escrow).balance, 0.5 ether);
+        // Client gets back only the unpaid 0.5 ether, not the full 1 ether.
+        assertEq(client.balance, 9.5 ether);
+        assertEq(freelancer.balance, 0.5 ether);
+
+        // Job 1's funds are untouched, so its client can still cancel.
+        assertEq(address(escrow).balance, 1 ether);
 
         vm.prank(client2);
-        vm.expectRevert("Refund failed");
         escrow.cancelJob(1);
+
+        assertEq(client2.balance, 10 ether);
+        assertEq(address(escrow).balance, 0);
     }
 
-    /// Bug 2: when every EXISTING milestone is paid the job becomes Completed, even
-    /// if the milestones sum to less than job.amount. The remainder is stuck forever.
-    function testBug_RemainderStrandedWhenMilestonesSumBelowJobAmount() public {
+    function testApproveJobAfterMilestonePaysOnlyRemainder() public {
+        _jobWithOneMilestonePaid();
+
+        vm.prank(freelancer);
+        escrow.markDelivered(0);
+
+        vm.prank(client);
+        escrow.approveJob(0);
+
+        // 0.5 via milestone + 0.5 remainder = exactly the job amount.
+        assertEq(freelancer.balance, 1 ether);
+        assertEq(address(escrow).balance, 0);
+        assertEq(uint256(_status(0)), uint256(FreelanceEscrow.JobStatus.Completed));
+    }
+
+    function testResolveDisputeAfterMilestonePaysOnlyRemainder() public {
+        _jobWithOneMilestonePaid();
+
+        vm.prank(client);
+        escrow.openDispute(0);
+
+        vm.prank(arbitrator);
+        escrow.resolveDispute(0, true);
+
+        assertEq(freelancer.balance, 1 ether);
+        assertEq(address(escrow).balance, 0);
+    }
+
+    function testResolveDisputeRefundAfterMilestoneRefundsOnlyRemainder() public {
+        _jobWithOneMilestonePaid();
+
+        vm.prank(client);
+        escrow.openDispute(0);
+
+        vm.prank(arbitrator);
+        escrow.resolveDispute(0, false);
+
+        assertEq(freelancer.balance, 0.5 ether);
+        assertEq(client.balance, 9.5 ether);
+        assertEq(address(escrow).balance, 0);
+    }
+
+    function testRemainderNotStrandedWhenMilestonesBelowJobAmount() public {
         vm.prank(client);
         escrow.createJob{value: 1 ether}(freelancer, "Job 0");
 
@@ -71,21 +124,18 @@ contract FreelanceEscrowBugsTest is Test {
         vm.prank(client);
         escrow.approveMilestone(0, 0);
 
-        (,,,, FreelanceEscrow.JobStatus status) = escrow.jobs(0);
-        assertEq(uint256(status), uint256(FreelanceEscrow.JobStatus.Completed));
+        // Job stays open because only half of the amount has been released.
+        assertEq(uint256(_status(0)), uint256(FreelanceEscrow.JobStatus.Created));
         assertEq(address(escrow).balance, 0.5 ether);
 
-        // No function can release the remaining 0.5 ether.
-        vm.prank(client);
-        vm.expectRevert("Job cannot be cancelled");
-        escrow.cancelJob(0);
+        // The remainder can still be released normally.
+        vm.prank(freelancer);
+        escrow.markDelivered(0);
 
         vm.prank(client);
-        vm.expectRevert("Job not delivered");
         escrow.approveJob(0);
 
-        vm.prank(client);
-        vm.expectRevert("Cannot dispute this job");
-        escrow.openDispute(0);
+        assertEq(freelancer.balance, 1 ether);
+        assertEq(address(escrow).balance, 0);
     }
 }
