@@ -42,6 +42,9 @@ contract FreelanceEscrow is ReentrancyGuard {
 
     mapping(uint256 => uint256) public milestoneTotal;
 
+    // Amount already paid out to the freelancer through milestones, per job
+    mapping(uint256 => uint256) public released;
+
     modifier jobExists(uint256 _jobId) {
         require(_jobId < jobCount, "Job does not exist");
         _;
@@ -110,7 +113,9 @@ contract FreelanceEscrow is ReentrancyGuard {
 
         job.status = JobStatus.Refunded;
 
-        (bool success,) = payable(job.client).call{value: job.amount}("");
+        uint256 refund = job.amount - released[_jobId];
+
+        (bool success,) = payable(job.client).call{value: refund}("");
 
         require(success, "Refund failed");
 
@@ -132,7 +137,9 @@ contract FreelanceEscrow is ReentrancyGuard {
 
         emit JobCompleted(_jobId);
 
-        (bool success,) = payable(job.freelancer).call{value: job.amount}("");
+        uint256 payout = job.amount - released[_jobId];
+
+        (bool success,) = payable(job.freelancer).call{value: payout}("");
 
         require(success, "Payment failed");
     }
@@ -164,16 +171,18 @@ contract FreelanceEscrow is ReentrancyGuard {
 
         require(job.status == JobStatus.Disputed, "Job is not disputed");
 
+        uint256 remaining = job.amount - released[_jobId];
+
         if (_payFreelancer) {
             job.status = JobStatus.Completed;
 
-            (bool success,) = payable(job.freelancer).call{value: job.amount}("");
+            (bool success,) = payable(job.freelancer).call{value: remaining}("");
 
             require(success, "Payment failed");
         } else {
             job.status = JobStatus.Refunded;
 
-            (bool success,) = payable(job.client).call{value: job.amount}("");
+            (bool success,) = payable(job.client).call{value: remaining}("");
 
             require(success, "Refund failed");
         }
@@ -212,13 +221,13 @@ contract FreelanceEscrow is ReentrancyGuard {
 
         require(msg.sender == job.freelancer, "Only freelancer can complete");
 
+        require(job.status == JobStatus.Created || job.status == JobStatus.Delivered, "Job not active");
+
         require(_milestoneId < jobMilestones[_jobId].length, "Milestone does not exist");
 
         Milestone storage milestone = jobMilestones[_jobId][_milestoneId];
 
         require(!milestone.completed, "Milestone already completed");
-
-        require(!milestone.paid, "Milestone already paid");
 
         milestone.completed = true;
     }
@@ -232,6 +241,8 @@ contract FreelanceEscrow is ReentrancyGuard {
 
         require(msg.sender == job.client, "Only client can approve");
 
+        require(job.status == JobStatus.Created || job.status == JobStatus.Delivered, "Job not active");
+
         require(_milestoneId < jobMilestones[_jobId].length, "Milestone does not exist");
 
         Milestone storage milestone = jobMilestones[_jobId][_milestoneId];
@@ -242,21 +253,14 @@ contract FreelanceEscrow is ReentrancyGuard {
 
         milestone.paid = true;
 
+        released[_jobId] += milestone.amount;
+
+        if (released[_jobId] == job.amount) {
+            job.status = JobStatus.Completed;
+        }
+
         (bool success,) = payable(job.freelancer).call{value: milestone.amount}("");
 
         require(success, "Payment failed");
-
-        bool allPaid = true;
-
-        for (uint256 i = 0; i < jobMilestones[_jobId].length; i++) {
-            if (!jobMilestones[_jobId][i].paid) {
-                allPaid = false;
-                break;
-            }
-        }
-
-        if (allPaid) {
-            job.status = JobStatus.Completed;
-        }
     }
 }

@@ -287,9 +287,19 @@ contract FreelanceEscrowBranchTest is Test {
         escrow.completeMilestone(id, 0);
     }
 
-    // NOTE: the `!milestone.paid` require in completeMilestone is unreachable.
-    // A milestone can only be paid after it is completed, so "already completed"
-    // always fires first. No test can hit it; consider deleting that require.
+    function testCannotCompleteMilestoneWhenJobNotActive() public {
+        uint256 id = _createJob(client, freelancer);
+
+        vm.prank(client);
+        escrow.addMilestone(id, "A", 0.5 ether);
+
+        vm.prank(client);
+        escrow.cancelJob(id);
+
+        vm.prank(freelancer);
+        vm.expectRevert("Job not active");
+        escrow.completeMilestone(id, 0);
+    }
 
     // =========================
     // approveMilestone
@@ -300,6 +310,23 @@ contract FreelanceEscrowBranchTest is Test {
 
         vm.prank(client);
         vm.expectRevert("Milestone does not exist");
+        escrow.approveMilestone(id, 0);
+    }
+
+    function testCannotApproveMilestoneWhenJobNotActive() public {
+        uint256 id = _createJob(client, freelancer);
+
+        vm.prank(client);
+        escrow.addMilestone(id, "A", 0.5 ether);
+
+        vm.prank(freelancer);
+        escrow.completeMilestone(id, 0);
+
+        vm.prank(client);
+        escrow.openDispute(id);
+
+        vm.prank(client);
+        vm.expectRevert("Job not active");
         escrow.approveMilestone(id, 0);
     }
 
@@ -341,12 +368,12 @@ contract FreelanceEscrowBranchTest is Test {
         escrow.completeMilestone(id, 1);
         vm.stopPrank();
 
-        // First approval: second milestone still unpaid -> loop `if` true + break, allPaid false
+        // First approval: only part of the job amount released -> job stays open
         vm.prank(client);
         escrow.approveMilestone(id, 0);
         assertEq(uint256(_status(id)), uint256(FreelanceEscrow.JobStatus.Created));
 
-        // Second approval: every milestone paid -> allPaid true
+        // Second approval: full job amount released -> job completes
         vm.prank(client);
         escrow.approveMilestone(id, 1);
         assertEq(uint256(_status(id)), uint256(FreelanceEscrow.JobStatus.Completed));
